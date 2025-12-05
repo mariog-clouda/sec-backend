@@ -1,6 +1,5 @@
 const express = require("express");
 const fetch = require("node-fetch");
-const PDFDocument = require("pdfkit");
 const HTMLtoDOCX = require("html-docx-js");
 const cheerio = require("cheerio");
 const ExcelJS = require("exceljs");
@@ -10,6 +9,8 @@ const PORT = process.env.PORT || 3000;
 
 // 🔴 IMPORTANT: replace this later with your real Cloudflare Worker URL
 const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
+const PDF_API_ENDPOINT = process.env.PDF_API_ENDPOINT;
+const PDF_API_KEY = process.env.PDF_API_KEY;
 
 
 /**
@@ -47,29 +48,20 @@ async function getFilingHtml(cik, accession, form) {
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
-  if (!process.env.PDF_API_ENDPOINT || !process.env.PDF_API_KEY) return res.status(500).send("PDF API not configured");
+  if (!PDF_API_ENDPOINT || !PDF_API_KEY) return res.status(500).send("PDF API not configured");
 
   try {
-    // Use SEC's HTML viewer (renders the form nicely)
-    const viewerUrl =
-      `https://www.sec.gov/cgi-bin/viewer?action=view` +
-      `&cik=${encodeURIComponent(cik)}` +
-      `&accession_number=${encodeURIComponent(accession)}` +
-      `&xbrl_type=v`;
+    const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`; // Form 4 for now
+    const url = `${PDF_API_ENDPOINT}?access_key=${encodeURIComponent(PDF_API_KEY)}&document_url=${encodeURIComponent(filingUrl)}`;
 
-    const pdfUrl =
-      `${process.env.PDF_API_ENDPOINT}` +
-      `?access_key=${encodeURIComponent(process.env.PDF_API_KEY)}` +
-      `&document_url=${encodeURIComponent(viewerUrl)}`;
-
-    const pdfRes = await fetch(pdfUrl);
-    if (!pdfRes.ok) {
-      const text = await pdfRes.text().catch(() => "");
-      console.error("PDF API error:", pdfRes.status, text);
+    const r = await fetch(url);
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      console.error("pdflayer error:", r.status, text);
       return res.status(500).send("Error from PDF API");
     }
 
-    const buf = Buffer.from(await pdfRes.arrayBuffer());
+    const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
     res.send(buf);
@@ -78,6 +70,7 @@ app.get("/filing-pdf", async (req, res) => {
     res.status(500).send("Error generating PDF");
   }
 });
+
 
 
 /**
@@ -175,6 +168,7 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
