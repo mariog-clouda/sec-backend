@@ -45,46 +45,29 @@ async function getFilingHtml(cik, accession, form) {
  */
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
-
-  if (!cik || !accession || !form) {
-    return res.status(400).send("Missing required query params");
-  }
+  if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
+  if (!process.env.PDF_API_ENDPOINT || !process.env.PDF_API_KEY) return res.status(500).send("PDF API not configured");
 
   try {
-    const html = await getFilingHtml(cik, accession, form);
+    const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`; // Form 4 for now
+    const pdfUrl = `${process.env.PDF_API_ENDPOINT}?access_key=${encodeURIComponent(process.env.PDF_API_KEY)}&document_url=${encodeURIComponent(filingUrl)}`;
 
-    // Extract plain text from HTML
-    const $ = cheerio.load(html);
-    const text = $("body").text().replace(/\s+\n/g, "\n").trim();
-
-    // Create a PDF in memory
-    const doc = new PDFDocument({ margin: 40 });
-    const chunks = [];
-
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => {
-      const pdfBuffer = Buffer.concat(chunks);
-
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="filing-${cik}-${form}.pdf"`
-      );
-      res.send(pdfBuffer);
-    });
-
-    doc.fontSize(14).text(`Filing ${form} – CIK ${cik}`, { underline: true });
-    doc.moveDown();
-    doc.fontSize(10).text(text, {
-      width: 500
-    });
-
-    doc.end();
+    const pdfRes = await fetch(pdfUrl);
+    if (!pdfRes.ok) {
+      const text = await pdfRes.text().catch(() => "");
+      console.error("pdflayer error:", pdfRes.status, text);
+      return res.status(500).send("Error from PDF API");
+    }
+    const buf = Buffer.from(await pdfRes.arrayBuffer());
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
+    res.send(buf);
   } catch (e) {
-    console.error(e);
+    console.error("PDF generation error:", e);
     res.status(500).send("Error generating PDF");
   }
 });
+
 
 
 /**
@@ -182,6 +165,7 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
