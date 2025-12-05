@@ -43,21 +43,32 @@ async function getFilingHtml(cik, accession, form) {
 /**
  * PDF route
  */
+
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
   if (!process.env.PDF_API_ENDPOINT || !process.env.PDF_API_KEY) return res.status(500).send("PDF API not configured");
 
   try {
-    const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`; // Form 4 for now
-    const pdfUrl = `${process.env.PDF_API_ENDPOINT}?access_key=${encodeURIComponent(process.env.PDF_API_KEY)}&document_url=${encodeURIComponent(filingUrl)}`;
+    // Use SEC's HTML viewer (renders the form nicely)
+    const viewerUrl =
+      `https://www.sec.gov/cgi-bin/viewer?action=view` +
+      `&cik=${encodeURIComponent(cik)}` +
+      `&accession_number=${encodeURIComponent(accession)}` +
+      `&xbrl_type=v`;
+
+    const pdfUrl =
+      `${process.env.PDF_API_ENDPOINT}` +
+      `?access_key=${encodeURIComponent(process.env.PDF_API_KEY)}` +
+      `&document_url=${encodeURIComponent(viewerUrl)}`;
 
     const pdfRes = await fetch(pdfUrl);
     if (!pdfRes.ok) {
       const text = await pdfRes.text().catch(() => "");
-      console.error("pdflayer error:", pdfRes.status, text);
+      console.error("PDF API error:", pdfRes.status, text);
       return res.status(500).send("Error from PDF API");
     }
+
     const buf = Buffer.from(await pdfRes.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
@@ -67,7 +78,6 @@ app.get("/filing-pdf", async (req, res) => {
     res.status(500).send("Error generating PDF");
   }
 });
-
 
 
 /**
@@ -165,6 +175,7 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
