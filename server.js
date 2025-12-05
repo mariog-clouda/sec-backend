@@ -9,7 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // 🔴 IMPORTANT: replace this later with your real Cloudflare Worker URL
-const WORKER_BASE_URL = "https://your-worker-url-here.com";
+const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
+
 
 /**
  * Fetch HTML from your Worker
@@ -162,3 +163,4 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
