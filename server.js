@@ -90,7 +90,9 @@ app.get("/filing-docx", async (req, res) => {
 
   try {
     const html = await getFilingHtml(cik, accession, form);
-    const buffer = HTMLtoDOCX(html);
+
+    // html-docx-js: use asBuffer() to generate a DOCX buffer
+    const buffer = HTMLtoDOCX.asBuffer(html);
 
     res.setHeader(
       "Content-Type",
@@ -106,6 +108,7 @@ app.get("/filing-docx", async (req, res) => {
     console.error(e);
     res.status(500).send("Error generating DOCX");
   }
+
 });
 
 /**
@@ -174,6 +177,7 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
