@@ -16,11 +16,15 @@ const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
  * Fetch HTML from your Worker
  */
 async function getFilingHtml(cik, accession, form) {
-  const url =
-    WORKER_BASE_URL +
-    `?cik=${encodeURIComponent(cik)}&accession=${encodeURIComponent(
-      accession
-    )}&form=${encodeURIComponent(form)}`;
+  let url;
+
+  // For now we handle Form 4 explicitly via /form4
+  if (String(form).trim() === "4") {
+    url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+  } else {
+    // Fallback – you can extend this later for other forms
+    url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+  }
 
   const res = await fetch(url);
 
@@ -34,6 +38,7 @@ async function getFilingHtml(cik, accession, form) {
   const html = await res.text();
   return html;
 }
+
 
 /**
  * PDF route
@@ -177,6 +182,7 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
 
