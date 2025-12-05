@@ -7,61 +7,59 @@ const ExcelJS = require("exceljs");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 🔴 IMPORTANT: replace this later with your real Cloudflare Worker URL
+// Worker that returns formatted Form 4 when called as /form4?accession=...
 const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
-const PDF_API_ENDPOINT = process.env.PDF_API_ENDPOINT;
-const PDF_API_KEY = process.env.PDF_API_KEY;
 
+// PDF API (pdflayer)
+const PDF_API_ENDPOINT = process.env.PDF_API_ENDPOINT; // e.g. https://api.pdflayer.com/api/convert
+const PDF_API_KEY = process.env.PDF_API_KEY;           // your pdflayer access_key
 
-/**
- * Fetch HTML from your Worker
- */
-async function getFilingHtml(cik, accession, form) {
-  let url;
-
-  // For now we handle Form 4 explicitly via /form4
-  if (String(form).trim() === "4") {
-    url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
-  } else {
-    // Fallback – you can extend this later for other forms
-    url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+// ---------- helpers ----------
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Fetch failed ${r.status}: ${t}`);
   }
-
-  const res = await fetch(url);
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      `Worker error (${res.status}): ${res.statusText} ${text}`
-    );
-  }
-
-  const html = await res.text();
-  return html;
+  return r.text();
 }
 
+// For now we handle Form 4 via /form4 (you can add more later)
+async function getFilingHtml(_cik, accession, form) {
+  if (String(form).trim() === "4") {
+    return fetchText(`${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`);
+  }
+  // default to form4 path for now so we always get something back during setup
+  return fetchText(`${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`);
+}
 
-/**
- * PDF route
- */
+// ---------- routes ----------
 
+// Root health
+app.get("/", (_req, res) => {
+  res.send("SEC Backend running");
+});
+
+// PDF via pdflayer (HTML→PDF)
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
   if (!PDF_API_ENDPOINT || !PDF_API_KEY) return res.status(500).send("PDF API not configured");
 
   try {
-    const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`; // Form 4 for now
-    const url = `${PDF_API_ENDPOINT}?access_key=${encodeURIComponent(PDF_API_KEY)}&document_url=${encodeURIComponent(filingUrl)}`;
+    // IMPORTANT: give pdflayer a URL it can render — the Worker /form4 page
+    const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+    const apiUrl =
+      `${PDF_API_ENDPOINT}?access_key=${encodeURIComponent(PDF_API_KEY)}&document_url=${encodeURIComponent(filingUrl)}`;
 
-    const r = await fetch(url);
-    if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      console.error("pdflayer error:", r.status, text);
+    const pdfRes = await fetch(apiUrl);
+    if (!pdfRes.ok) {
+      const txt = await pdfRes.text().catch(() => "");
+      console.error("pdflayer error:", pdfRes.status, txt);
       return res.status(500).send("Error from PDF API");
     }
 
-    const buf = Buffer.from(await r.arrayBuffer());
+    const buf = Buffer.from(await pdfRes.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
     res.send(buf);
@@ -71,103 +69,61 @@ app.get("/filing-pdf", async (req, res) => {
   }
 });
 
-
-
-/**
- * DOCX route
- */
+// DOCX (we'll fix after PDF; still wired to Worker HTML)
 app.get("/filing-docx", async (req, res) => {
   const { cik, accession, form } = req.query;
+  if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
 
   try {
     const html = await getFilingHtml(cik, accession, form);
-
-    // html-docx-js: use asBuffer() to generate a DOCX buffer
     const buffer = HTMLtoDOCX.asBuffer(html);
-
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="filing-${cik}-${form}.docx"`
-    );
-
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.docx"`);
     res.send(buffer);
   } catch (e) {
-    console.error(e);
+    console.error("DOCX generation error:", e);
     res.status(500).send("Error generating DOCX");
   }
-
 });
 
-/**
- * Extract first table from HTML
- */
+// XLSX (first table only)
 function extractFirstTable(html) {
   const $ = cheerio.load(html);
   const table = $("table").first();
   if (!table.length) return null;
-
   const rows = [];
   table.find("tr").each((_, tr) => {
     const cells = [];
-    $(tr)
-      .find("th, td")
-      .each((__, cell) => {
-        cells.push($(cell).text().trim());
-      });
-    rows.push(cells);
+    $(tr).find("th, td").each((__, cell) => cells.push($(cell).text().trim()));
+    if (cells.length) rows.push(cells);
   });
-
-  return rows;
+  return rows.length ? rows : null;
 }
 
-/**
- * XLSX route
- */
 app.get("/filing-xlsx", async (req, res) => {
   const { cik, accession, form } = req.query;
+  if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
 
   try {
     const html = await getFilingHtml(cik, accession, form);
     const table = extractFirstTable(html);
+    if (!table) return res.status(400).send("No table found in filing");
 
-    if (!table) return res.status(400).send("No table found");
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Data");
+    table.forEach(row => ws.addRow(row));
 
-    const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Data");
-
-    table.forEach((row) => sheet.addRow(row));
-
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="filing-${cik}-${form}.xlsx"`
-    );
-
-    await workbook.xlsx.write(res);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.xlsx"`);
+    await wb.xlsx.write(res);
     res.end();
   } catch (e) {
-    console.error(e);
+    console.error("XLSX generation error:", e);
     res.status(500).send("Error generating XLSX");
   }
 });
 
-/**
- * Health check
- */
-app.get("/", (req, res) => {
-  res.send("SEC Backend running");
-});
-
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running on port", PORT));
 
 
 
