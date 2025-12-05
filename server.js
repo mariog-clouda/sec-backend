@@ -1,6 +1,6 @@
 const express = require("express");
 const fetch = require("node-fetch");
-const puppeteer = require("puppeteer");
+const PDFDocument = require("pdfkit");
 const HTMLtoDOCX = require("html-docx-js");
 const cheerio = require("cheerio");
 const ExcelJS = require("exceljs");
@@ -41,36 +41,46 @@ async function getFilingHtml(cik, accession, form) {
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
 
+  if (!cik || !accession || !form) {
+    return res.status(400).send("Missing required query params");
+  }
+
   try {
     const html = await getFilingHtml(cik, accession, form);
 
-const browser = await puppeteer.launch({
-  headless: true,
-  args: ["--no-sandbox", "--disable-setuid-sandbox"]
-});
+    // Extract plain text from HTML
+    const $ = cheerio.load(html);
+    const text = $("body").text().replace(/\s+\n/g, "\n").trim();
 
+    // Create a PDF in memory
+    const doc = new PDFDocument({ margin: 40 });
+    const chunks = [];
 
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0" });
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => {
+      const pdfBuffer = Buffer.concat(chunks);
 
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="filing-${cik}-${form}.pdf"`
+      );
+      res.send(pdfBuffer);
     });
 
-    await browser.close();
+    doc.fontSize(14).text(`Filing ${form} – CIK ${cik}`, { underline: true });
+    doc.moveDown();
+    doc.fontSize(10).text(text, {
+      width: 500
+    });
 
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="filing-${cik}-${form}.pdf"`
-    );
-    res.send(pdfBuffer);
+    doc.end();
   } catch (e) {
     console.error(e);
     res.status(500).send("Error generating PDF");
   }
 });
+
 
 /**
  * DOCX route
@@ -164,5 +174,6 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
 
 
