@@ -49,43 +49,51 @@ app.get("/filing-pdf", async (req, res) => {
   try {
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
 
-    // ✅ PDFShift requires Basic auth with "api:{API_KEY}"
+    // PDFShift requires Basic auth: "api:{KEY}"
     const auth = "Basic " + Buffer.from(`api:${PDFSHIFT_KEY}`).toString("base64");
 
-    const r = await fetch(PDFSHIFT_ENDPOINT, {
+    // Minimal payload: just the URL and print CSS. No margins/background fields.
+    let r = await fetch(PDFSHIFT_ENDPOINT, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": auth
-      },
+      headers: { "Content-Type": "application/json", "Authorization": auth },
       body: JSON.stringify({
         source: filingUrl,
-        use_print: true,
-        include_background: true,
-        landscape: false,
-        margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
+        use_print_css: true
       })
     });
 
-    // Debug passthrough
+    // If provider doesn’t accept use_print_css, fallback to use_print
+    if (r.status === 400) {
+      const txt = await r.text();
+      if (debug === "1") return res.status(400).send(txt);
+      r = await fetch(PDFSHIFT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": auth },
+        body: JSON.stringify({
+          source: filingUrl,
+          use_print: true
+        })
+      });
+    }
+
     if (debug === "1") {
-      const txt = await r.text().catch(() => "");
-      return res.status(r.status).type("application/json; charset=utf-8").send(txt || "");
+      const dbg = await r.text();
+      return res.status(r.status).send(dbg);
     }
 
     if (!r.ok) {
-      const txt = await r.text().catch(() => "");
-      console.error("PDFShift error:", r.status, txt);
+      const errTxt = await r.text().catch(() => "");
+      console.error("PDFShift error:", r.status, errTxt);
       return res.status(502).send("Error from PDF service");
     }
 
     const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-    return res.send(buf);
+    res.send(buf);
   } catch (e) {
     console.error("PDF generation error:", e);
-    return res.status(500).send("Error generating PDF");
+    res.status(500).send("Error generating PDF");
   }
 });
 
@@ -138,6 +146,7 @@ app.get("/__diag", (_req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
 
 
 
