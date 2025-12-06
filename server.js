@@ -41,67 +41,66 @@ app.get("/", (_req, res) => {
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form, debug } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
+
+  const PDFSHIFT_ENDPOINT = process.env.PDFSHIFT_ENDPOINT;
+  const PDFSHIFT_KEY = process.env.PDFSHIFT_KEY;
   if (!PDFSHIFT_ENDPOINT || !PDFSHIFT_KEY) return res.status(500).send("PDF API not configured");
 
   try {
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
 
-    // PDFShift uses Basic Auth with the API key as the username.
-    const auth = "Basic " + Buffer.from(`${PDFSHIFT_KEY}:`).toString("base64");
+    // Helper: one attempt to PDFShift
+    const callPdfShift = async (authHeader) => {
+      const r = await fetch(PDFSHIFT_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": authHeader
+        },
+        body: JSON.stringify({
+          source: filingUrl,
+          use_print: true,
+          include_background: true,
+          landscape: false,
+          margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
+        })
+      });
+      return r;
+    };
 
-    const r = await fetch(PDFSHIFT_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": auth
-      },
-      body: JSON.stringify({
-        source: filingUrl,
-        use_print: true,
-        include_background: true,
-        landscape: false,
-        margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
-      })
-    });
+    // Try with "key:" (most providers expect the colon)
+    const authWithColon = "Basic " + Buffer.from(`${PDFSHIFT_KEY}:`).toString("base64");
+    let resp = await callPdfShift(authWithColon);
+    let raw = await resp.text();
 
-    // Debug passthrough (inspect provider response)
+    // If 401, try again WITHOUT the colon (some setups require this)
+    if (resp.status === 401) {
+      const authNoColon = "Basic " + Buffer.from(PDFSHIFT_KEY).toString("base64");
+      resp = await callPdfShift(authNoColon);
+      raw = await resp.text();
+    }
+
+    // Debug: show exactly what PDFShift returns
     if (debug === "1") {
-      const txt = await r.text();
-      return res.status(r.status).send(txt);
+      return res.status(resp.status).type("application/json; charset=utf-8").send(raw);
     }
 
-    if (!r.ok) {
-      const txt = await r.text().catch(() => "");
-      console.error("PDFShift error:", r.status, txt);
-      return res.status(500).send("Error from PDF API");
+    if (!resp.ok) {
+      console.error("PDFShift error:", resp.status, raw?.slice?.(0, 400) || raw);
+      return res.status(502).send("PDF service error.");
     }
 
-    const buf = Buffer.from(await r.arrayBuffer());
+    // Success: resp body is binary PDF
+    const pdfBuffer = Buffer.from(raw, "binary"); // raw is already the PDF bytes
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-    return res.send(buf);
+    return res.send(pdfBuffer);
   } catch (e) {
     console.error("PDF generation error:", e);
-    res.status(500).send("Error generating PDF");
+    return res.status(500).send("Error generating PDF");
   }
 });
 
-// DOCX (convert Worker HTML to .docx)
-app.get("/filing-docx", async (req, res) => {
-  const { cik, accession, form } = req.query;
-  if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
-
-  try {
-    const html = await getFilingHtml(cik, accession, form);
-    const buffer = HTMLtoDOCX.asBuffer(html);
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.docx"`);
-    res.send(buffer);
-  } catch (e) {
-    console.error("DOCX generation error:", e);
-    res.status(500).send("Error generating DOCX");
-  }
-});
 
 // XLSX (first table found)
 function extractFirstTable(html) {
@@ -150,6 +149,7 @@ app.get("/__diag", (_req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
 
 
 
