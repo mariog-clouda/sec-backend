@@ -44,30 +44,62 @@ app.get("/", (_req, res) => {
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
-  if (!PDF_API_ENDPOINT || !PDF_API_KEY) return res.status(500).send("PDF API not configured");
+
+  const endpoint = process.env.API2PDF_ENDPOINT;
+  const key = process.env.API2PDF_KEY;
+  if (!endpoint || !key) return res.status(500).send("PDF API not configured");
 
   try {
-    // IMPORTANT: give pdflayer a URL it can render — the Worker /form4 page
+    // Use your Worker’s formatted Form 4 URL (XML + XSL; Chrome will render it)
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
-    const apiUrl =
-      `${PDF_API_ENDPOINT}?access_key=${encodeURIComponent(PDF_API_KEY)}&document_url=${encodeURIComponent(filingUrl)}`;
 
-    const pdfRes = await fetch(apiUrl);
-    if (!pdfRes.ok) {
-      const txt = await pdfRes.text().catch(() => "");
-      console.error("pdflayer error:", pdfRes.status, txt);
+    // Api2Pdf expects POST with JSON and Authorization header
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": key
+      },
+      body: JSON.stringify({
+        url: filingUrl,
+        inlinePdf: false,          // return PDF data (not just URL)
+        printBackground: true,
+        landscape: false,
+        // optional margins / paper size if you want:
+        // options: { paperWidth: 8.5, paperHeight: 11, marginTop: 0.5, marginBottom: 0.5, marginLeft: 0.5, marginRight: 0.5 }
+      })
+    });
+
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      console.error("Api2Pdf error:", r.status, txt);
       return res.status(500).send("Error from PDF API");
     }
 
-    const buf = Buffer.from(await pdfRes.arrayBuffer());
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-    res.send(buf);
+    // Api2Pdf returns JSON by default: { success, pdf, mbIn, mbOut, ... }
+    const data = await r.json().catch(() => null);
+
+    // If it returned binary directly (rare), handle that too:
+    if (data && data.pdf) {
+      // data.pdf is a URL to the generated PDF (temporary). Fetch and stream it.
+      const pdfFetch = await fetch(data.pdf);
+      const buf = Buffer.from(await pdfFetch.arrayBuffer());
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
+      return res.send(buf);
+    } else {
+      // Fallback if endpoint returned binary directly:
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
+      return res.send(buf);
+    }
   } catch (e) {
     console.error("PDF generation error:", e);
     res.status(500).send("Error generating PDF");
   }
 });
+
 
 // DOCX (we'll fix after PDF; still wired to Worker HTML)
 app.get("/filing-docx", async (req, res) => {
@@ -124,6 +156,7 @@ app.get("/filing-xlsx", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
 
 
 
