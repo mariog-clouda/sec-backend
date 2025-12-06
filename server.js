@@ -15,8 +15,10 @@ const PDFSHIFT_ENDPOINT = process.env.PDFSHIFT_ENDPOINT; // https://api.pdfshift
 const PDFSHIFT_KEY = process.env.PDFSHIFT_KEY;           // your PDFShift API key
 
 // ----------------- helpers -----------------
-async function fetchText(url) {
-  const r = await fetch(url);
+
+// Generic fetch helper that supports headers (needed for sec.gov)
+async function fetchText(url, options = {}) {
+  const r = await fetch(url, options);
   if (!r.ok) {
     const t = await r.text().catch(() => "");
     throw new Error(`Fetch failed ${r.status}: ${t}`);
@@ -56,23 +58,27 @@ async function getPrimaryDocumentUrlFromIndex(cik, accession, form) {
   const accClean = cleanAccession(accession);
   const normalizedForm = form.toUpperCase().trim();
 
-  // Try index-headers first, then fallback to index.html
   const baseFolder = `https://www.sec.gov/Archives/edgar/data/${cikClean}/${accClean}/`;
+
+  // SEC requires a proper User-Agent
+  const secHeaders = {
+    "User-Agent": "CloudastructureSECWidget/1.0 (https://www.cloudastructure.com/contact)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  };
+
   const indexCandidates = [
     `${baseFolder}${accClean}-index-headers.html`,
     `${baseFolder}${accClean}-index.html`
   ];
 
   let indexHtml = null;
-  let usedIndexUrl = null;
 
   for (const url of indexCandidates) {
     try {
-      indexHtml = await fetchText(url);
-      usedIndexUrl = url;
+      indexHtml = await fetchText(url, { headers: secHeaders });
       break;
-    } catch (e) {
-      // try next
+    } catch (_e) {
+      // try next candidate
     }
   }
 
@@ -82,10 +88,10 @@ async function getPrimaryDocumentUrlFromIndex(cik, accession, form) {
 
   const $ = cheerio.load(indexHtml);
 
-  // SEC index usually has a table with document list; often has class .tableFile
+  // SEC index usually has .tableFile; fallback to first table if not
   let table = $("table.tableFile").first();
   if (!table.length) {
-    table = $("table").first(); // fallback: first table on the page
+    table = $("table").first();
   }
   if (!table.length) {
     throw new Error("No table found in SEC index page");
@@ -105,7 +111,6 @@ async function getPrimaryDocumentUrlFromIndex(cik, accession, form) {
 
     let size = 0;
     if (sizeText) {
-      // e.g. "1,234 KB" → 1234
       const num = parseFloat(sizeText.replace(/[^0-9.]/g, ""));
       if (!isNaN(num)) size = num;
     }
@@ -122,46 +127,33 @@ async function getPrimaryDocumentUrlFromIndex(cik, accession, form) {
     throw new Error("No document rows found in SEC index table");
   }
 
-  // Helper to test if a filename looks like HTML
   const isHtmlDoc = (fname) =>
     fname.toLowerCase().endsWith(".htm") ||
     fname.toLowerCase().endsWith(".html");
 
-  // ---- Match rows where Type matches the requested form ----
+  // Exact Type matches
   let matching = rows.filter(r => r.type === normalizedForm);
 
-  // Special case: EFFECT, sometimes shows as "EFFECT" exactly, so above is fine.
-  // If no exact matches found and we want looser matching for families (e.g. "8-A12B"),
-  // you could add logic here. For now we rely on exact match since your forms are clean.
-
-  // Prefer HTML docs
   let htmlMatches = matching.filter(r => isHtmlDoc(r.document));
 
   let chosen = null;
 
   if (htmlMatches.length) {
-    // Prefer description containing the form (like "Form 10-K")
     let descMatches = htmlMatches.filter(r =>
       r.description.toUpperCase().includes(normalizedForm)
     );
     if (!descMatches.length) descMatches = htmlMatches;
-
-    // Choose the largest file among the preferred set (usually the main form)
     descMatches.sort((a, b) => (b.size || 0) - (a.size || 0));
     chosen = descMatches[0];
   } else if (matching.length) {
-    // No HTML but we have some match; pick the first
     chosen = matching[0];
   }
 
-  // If still nothing (no Type matches), fallback: first HTML doc in the table
   if (!chosen) {
     const allHtml = rows.filter(r => isHtmlDoc(r.document));
     if (!allHtml.length) {
-      // ultimate fallback: just first row
       chosen = rows[0];
     } else {
-      // pick the largest HTML file
       allHtml.sort((a, b) => (b.size || 0) - (a.size || 0));
       chosen = allHtml[0];
     }
@@ -174,7 +166,7 @@ async function getPrimaryDocumentUrlFromIndex(cik, accession, form) {
   return baseFolder + chosen.document;
 }
 
-// For v1 we still handle XLSX via the Worker HTML (you already had this)
+// For v1 we still handle XLSX via the Worker HTML (unchanged)
 async function getFilingHtml(_cik, accession, _form) {
   const url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
   return fetchText(url);
@@ -205,18 +197,16 @@ app.get("/filing-pdf", async (req, res) => {
 
     let filingUrl = null;
 
-    // 1) Try ownership map for 3 / 4 / 5
+    // 1) Ownership forms: 3 / 4 / 5
     filingUrl = getOwnershipStyledUrl(cik, accession, normalizedForm);
 
-    // 2) If not an ownership form, use index-based detection
+    // 2) Everything else: index-based detection
     if (!filingUrl) {
       filingUrl = await getPrimaryDocumentUrlFromIndex(cik, accession, normalizedForm);
     }
 
-    // PDFShift requires Basic auth: "api:{KEY}"
     const auth = "Basic " + Buffer.from(`api:${pdfKey}`).toString("base64");
 
-    // Minimal payload: just the URL and print CSS
     let r = await fetch(pdfEndpoint, {
       method: "POST",
       headers: {
@@ -229,7 +219,6 @@ app.get("/filing-pdf", async (req, res) => {
       })
     });
 
-    // If provider doesn’t accept use_print_css, fallback to use_print
     if (r.status === 400) {
       const txt = await r.text();
       if (debug === "1") return res.status(400).send(txt);
@@ -271,7 +260,7 @@ app.get("/filing-pdf", async (req, res) => {
 });
 
 
-// XLSX (first table found)
+// XLSX (first table found – unchanged)
 function extractFirstTable(html) {
   const $ = cheerio.load(html);
   const table = $("table").first();
@@ -326,6 +315,8 @@ app.get("/__diag", (_req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
+
 
 
 
