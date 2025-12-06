@@ -7,14 +7,14 @@ const ExcelJS = require("exceljs");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Worker that returns formatted Form 4 when called as /form4?accession=...
+// Your Cloudflare Worker (serves formatted Form 4 at /form4?accession=...)
 const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
 
-// PDF API (pdflayer)
-const PDF_API_ENDPOINT = process.env.PDF_API_ENDPOINT; // e.g. https://api.pdflayer.com/api/convert
-const PDF_API_KEY = process.env.PDF_API_KEY;           // your pdflayer access_key
+// Api2Pdf (Chrome HTML→PDF) – set these in Render → Environment
+const API2PDF_ENDPOINT = process.env.API2PDF_ENDPOINT; // e.g. https://v2.api2pdf.com/chrome/url-to-pdf
+const API2PDF_KEY = process.env.API2PDF_KEY;           // your Api2Pdf key
 
-// ---------- helpers ----------
+// ----------------- helpers -----------------
 async function fetchText(url) {
   const r = await fetch(url);
   if (!r.ok) {
@@ -24,48 +24,46 @@ async function fetchText(url) {
   return r.text();
 }
 
-// For now we handle Form 4 via /form4 (you can add more later)
+// For now, handle Form 4 via /form4; extend later for 8-K/10-K/etc.
 async function getFilingHtml(_cik, accession, form) {
-  if (String(form).trim() === "4") {
-    return fetchText(`${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`);
-  }
-  // default to form4 path for now so we always get something back during setup
-  return fetchText(`${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`);
+  const isForm4 = String(form).trim() === "4";
+  const url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+  // We always call /form4 while you’re finishing v1; change this when adding more forms.
+  return fetchText(url);
 }
 
-// ---------- routes ----------
+// ----------------- routes -----------------
 
-// Root health
+// Health
 app.get("/", (_req, res) => {
   res.send("SEC Backend running");
 });
 
-// PDF via pdflayer (HTML→PDF)
+// PDF (styled) via Api2Pdf (Chrome renders XML+XSL like a browser)
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
 
-  const endpoint = process.env.API2PDF_ENDPOINT;
-  const key = process.env.API2PDF_KEY;
-  if (!endpoint || !key) return res.status(500).send("PDF API not configured");
+  if (!API2PDF_ENDPOINT || !API2PDF_KEY) {
+    console.error("Missing API2PDF_ENDPOINT or API2PDF_KEY");
+    return res.status(500).send("PDF API not configured");
+  }
 
   try {
-    // Use your Worker’s formatted Form 4 URL (XML + XSL; Chrome will render it)
+    // Give Api2Pdf the rendered filing URL (your Worker)
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
 
-    // Api2Pdf expects POST with JSON and Authorization header
-    const r = await fetch(endpoint, {
+    const r = await fetch(API2PDF_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": key
+        "Authorization": API2PDF_KEY
       },
       body: JSON.stringify({
         url: filingUrl,
-        inlinePdf: false,          // return PDF data (not just URL)
+        inlinePdf: false,
         printBackground: true,
-        landscape: false,
-        // optional margins / paper size if you want:
+        // Optional: page settings
         // options: { paperWidth: 8.5, paperHeight: 11, marginTop: 0.5, marginBottom: 0.5, marginLeft: 0.5, marginRight: 0.5 }
       })
     });
@@ -76,32 +74,35 @@ app.get("/filing-pdf", async (req, res) => {
       return res.status(500).send("Error from PDF API");
     }
 
-    // Api2Pdf returns JSON by default: { success, pdf, mbIn, mbOut, ... }
+    // Api2Pdf typically returns JSON: { success, pdf, ... }
     const data = await r.json().catch(() => null);
 
-    // If it returned binary directly (rare), handle that too:
     if (data && data.pdf) {
-      // data.pdf is a URL to the generated PDF (temporary). Fetch and stream it.
+      // data.pdf is a temporary URL to the generated PDF
       const pdfFetch = await fetch(data.pdf);
+      if (!pdfFetch.ok) {
+        const t = await pdfFetch.text().catch(() => "");
+        console.error("Fetch PDF URL error:", pdfFetch.status, t);
+        return res.status(500).send("Error fetching generated PDF");
+      }
       const buf = Buffer.from(await pdfFetch.arrayBuffer());
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
       return res.send(buf);
-    } else {
-      // Fallback if endpoint returned binary directly:
-      const buf = Buffer.from(await r.arrayBuffer());
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-      return res.send(buf);
     }
+
+    // Fallback in case the API returned binary directly (rare)
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
+    return res.send(buf);
   } catch (e) {
     console.error("PDF generation error:", e);
     res.status(500).send("Error generating PDF");
   }
 });
 
-
-// DOCX (we'll fix after PDF; still wired to Worker HTML)
+// DOCX (turn Worker HTML into .docx)
 app.get("/filing-docx", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
@@ -118,7 +119,7 @@ app.get("/filing-docx", async (req, res) => {
   }
 });
 
-// XLSX (first table only)
+// XLSX (first table found in the HTML)
 function extractFirstTable(html) {
   const $ = cheerio.load(html);
   const table = $("table").first();
