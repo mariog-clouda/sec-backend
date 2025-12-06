@@ -7,7 +7,7 @@ const ExcelJS = require("exceljs");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Cloudflare Worker: serves formatted Form 4 at /form4?accession=...
+// Cloudflare Worker: serves formatted Form 4 HTML at /form4?accession=...
 const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
 
 // PDFShift (Headless Chrome HTML→PDF)
@@ -24,8 +24,16 @@ async function fetchText(url) {
   return r.text();
 }
 
-// For v1 we handle Form 4 via /form4 (extend later for other forms)
-async function getFilingHtml(_cik, accession, form) {
+// Build the SEC "styled" Form 4 URL, e.g.
+// https://www.sec.gov/Archives/edgar/data/1709628/000168316825008885/xslF345X05/ownership.xml
+function buildForm4StyledUrl(cik, accession) {
+  const cleanCik = String(cik).replace(/^0+/, ""); // remove leading zeros if any
+  const accessionNoDashes = String(accession).replace(/-/g, "");
+  return `https://www.sec.gov/Archives/edgar/data/${cleanCik}/${accessionNoDashes}/xslF345X05/ownership.xml`;
+}
+
+// For XLSX we still use the Worker HTML (for now)
+async function getFilingHtml(_cik, accession, _form) {
   const url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
   return fetchText(url);
 }
@@ -40,14 +48,29 @@ app.get("/", (_req, res) => {
 // PDF via PDFShift (styled, Chrome-rendered)
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form, debug } = req.query;
-  if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
+  if (!cik || !accession || !form) {
+    return res.status(400).send("Missing required query params");
+  }
 
   const PDFSHIFT_ENDPOINT = process.env.PDFSHIFT_ENDPOINT;
   const PDFSHIFT_KEY = process.env.PDFSHIFT_KEY;
-  if (!PDFSHIFT_ENDPOINT || !PDFSHIFT_KEY) return res.status(500).send("PDF API not configured");
+  if (!PDFSHIFT_ENDPOINT || !PDFSHIFT_KEY) {
+    return res.status(500).send("PDF API not configured");
+  }
 
   try {
-    const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+    let filingUrl;
+
+    // For now we only handle Form 4 here
+    if (form === "4") {
+      // *** IMPORTANT CHANGE ***
+      // Use the SEC "styled" ownership XML with xslF345X05.
+      filingUrl = buildForm4StyledUrl(cik, accession);
+    } else {
+      // Fallback – if later you support other forms, point this
+      // to the worker or another helper.
+      filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
+    }
 
     // PDFShift requires Basic auth: "api:{KEY}"
     const auth = "Basic " + Buffer.from(`api:${PDFSHIFT_KEY}`).toString("base64");
@@ -55,7 +78,10 @@ app.get("/filing-pdf", async (req, res) => {
     // Minimal payload: just the URL and print CSS. No margins/background fields.
     let r = await fetch(PDFSHIFT_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": auth },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": auth
+      },
       body: JSON.stringify({
         source: filingUrl,
         use_print_css: true
@@ -68,7 +94,10 @@ app.get("/filing-pdf", async (req, res) => {
       if (debug === "1") return res.status(400).send(txt);
       r = await fetch(PDFSHIFT_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": auth },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": auth
+        },
         body: JSON.stringify({
           source: filingUrl,
           use_print: true
@@ -89,14 +118,16 @@ app.get("/filing-pdf", async (req, res) => {
 
     const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="filing-${cik}-${form}.pdf"`
+    );
     res.send(buf);
   } catch (e) {
     console.error("PDF generation error:", e);
     res.status(500).send("Error generating PDF");
   }
 });
-
 
 
 // XLSX (first table found)
@@ -115,7 +146,9 @@ function extractFirstTable(html) {
 
 app.get("/filing-xlsx", async (req, res) => {
   const { cik, accession, form } = req.query;
-  if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
+  if (!cik || !accession || !form) {
+    return res.status(400).send("Missing required query params");
+  }
 
   try {
     const html = await getFilingHtml(cik, accession, form);
@@ -126,8 +159,14 @@ app.get("/filing-xlsx", async (req, res) => {
     const ws = wb.addWorksheet("Data");
     table.forEach(row => ws.addRow(row));
 
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.xlsx"`);
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="filing-${cik}-${form}.xlsx"`
+    );
     await wb.xlsx.write(res);
     res.end();
   } catch (e) {
@@ -146,12 +185,6 @@ app.get("/__diag", (_req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
-
-
-
-
-
-
 
 
 
