@@ -49,57 +49,46 @@ app.get("/filing-pdf", async (req, res) => {
   try {
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
 
-    // Helper: one attempt to PDFShift
-    const callPdfShift = async (authHeader) => {
-      const r = await fetch(PDFSHIFT_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": authHeader
-        },
-        body: JSON.stringify({
-          source: filingUrl,
-          use_print: true,
-          include_background: true,
-          landscape: false,
-          margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
-        })
-      });
-      return r;
-    };
+    // ✅ PDFShift requires Basic auth with "api:{API_KEY}"
+    const auth = "Basic " + Buffer.from(`api:${PDFSHIFT_KEY}`).toString("base64");
 
-    // Try with "key:" (most providers expect the colon)
-    const authWithColon = "Basic " + Buffer.from(`${PDFSHIFT_KEY}:`).toString("base64");
-    let resp = await callPdfShift(authWithColon);
-    let raw = await resp.text();
+    const r = await fetch(PDFSHIFT_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": auth
+      },
+      body: JSON.stringify({
+        source: filingUrl,
+        use_print: true,
+        include_background: true,
+        landscape: false,
+        margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
+      })
+    });
 
-    // If 401, try again WITHOUT the colon (some setups require this)
-    if (resp.status === 401) {
-      const authNoColon = "Basic " + Buffer.from(PDFSHIFT_KEY).toString("base64");
-      resp = await callPdfShift(authNoColon);
-      raw = await resp.text();
-    }
-
-    // Debug: show exactly what PDFShift returns
+    // Debug passthrough
     if (debug === "1") {
-      return res.status(resp.status).type("application/json; charset=utf-8").send(raw);
+      const txt = await r.text().catch(() => "");
+      return res.status(r.status).type("application/json; charset=utf-8").send(txt || "");
     }
 
-    if (!resp.ok) {
-      console.error("PDFShift error:", resp.status, raw?.slice?.(0, 400) || raw);
-      return res.status(502).send("PDF service error.");
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      console.error("PDFShift error:", r.status, txt);
+      return res.status(502).send("Error from PDF service");
     }
 
-    // Success: resp body is binary PDF
-    const pdfBuffer = Buffer.from(raw, "binary"); // raw is already the PDF bytes
+    const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-    return res.send(pdfBuffer);
+    return res.send(buf);
   } catch (e) {
     console.error("PDF generation error:", e);
     return res.status(500).send("Error generating PDF");
   }
 });
+
 
 
 // XLSX (first table found)
@@ -149,6 +138,7 @@ app.get("/__diag", (_req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
 
 
 
