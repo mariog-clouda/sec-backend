@@ -40,19 +40,19 @@ app.get("/", (_req, res) => {
 });
 
 // PDF (styled) via Api2Pdf (Chrome renders XML+XSL like a browser)
+
 app.get("/filing-pdf", async (req, res) => {
-  const { cik, accession, form } = req.query;
+  const { cik, accession, form, debug } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
 
-  if (!API2PDF_ENDPOINT || !API2PDF_KEY) {
-    console.error("Missing API2PDF_ENDPOINT or API2PDF_KEY");
-    return res.status(500).send("PDF API not configured");
-  }
+  const API2PDF_ENDPOINT = process.env.API2PDF_ENDPOINT;
+  const API2PDF_KEY = process.env.API2PDF_KEY;
+  if (!API2PDF_ENDPOINT || !API2PDF_KEY) return res.status(500).send("PDF API not configured");
 
   try {
-    // Give Api2Pdf the rendered filing URL (your Worker)
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
 
+    // Call Api2Pdf
     const r = await fetch(API2PDF_ENDPOINT, {
       method: "POST",
       headers: {
@@ -61,46 +61,59 @@ app.get("/filing-pdf", async (req, res) => {
       },
       body: JSON.stringify({
         url: filingUrl,
-        inlinePdf: false,
         printBackground: true,
-        // Optional: page settings
-        // options: { paperWidth: 8.5, paperHeight: 11, marginTop: 0.5, marginBottom: 0.5, marginLeft: 0.5, marginRight: 0.5 }
+        inline: false,            // v2 parameter name
+        usePrintCss: true,
+        marginTop: 0.5,
+        marginBottom: 0.5,
+        marginLeft: 0.5,
+        marginRight: 0.5
       })
     });
 
+    // If debug=1, return raw API response text so we can see errors
+    const raw = await r.text();
+    if (debug === "1") {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return res.status(r.status).send(raw);
+    }
+
     if (!r.ok) {
-      const txt = await r.text().catch(() => "");
-      console.error("Api2Pdf error:", r.status, txt);
+      console.error("Api2Pdf HTTP error:", r.status, raw);
       return res.status(500).send("Error from PDF API");
     }
 
-    // Api2Pdf typically returns JSON: { success, pdf, ... }
-    const data = await r.json().catch(() => null);
-
-    if (data && data.pdf) {
-      // data.pdf is a temporary URL to the generated PDF
-      const pdfFetch = await fetch(data.pdf);
-      if (!pdfFetch.ok) {
-        const t = await pdfFetch.text().catch(() => "");
-        console.error("Fetch PDF URL error:", pdfFetch.status, t);
-        return res.status(500).send("Error fetching generated PDF");
-      }
-      const buf = Buffer.from(await pdfFetch.arrayBuffer());
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-      return res.send(buf);
+    // Parse JSON and fetch the PDF URL
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      console.error("Api2Pdf non-JSON response:", raw.slice(0, 300));
+      return res.status(500).send("Unexpected PDF API response");
     }
 
-    // Fallback in case the API returned binary directly (rare)
-    const buf = Buffer.from(await r.arrayBuffer());
+    if (!data.success || !data.pdf) {
+      console.error("Api2Pdf reported failure:", data);
+      return res.status(500).send("PDF API reported failure");
+    }
+
+    const pdfFetch = await fetch(data.pdf);
+    if (!pdfFetch.ok) {
+      const t = await pdfFetch.text().catch(() => "");
+      console.error("Fetch generated PDF failed:", pdfFetch.status, t);
+      return res.status(500).send("Failed to fetch generated PDF");
+    }
+
+    const buf = Buffer.from(await pdfFetch.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-    return res.send(buf);
+    res.send(buf);
   } catch (e) {
     console.error("PDF generation error:", e);
     res.status(500).send("Error generating PDF");
   }
 });
+
 
 // DOCX (turn Worker HTML into .docx)
 app.get("/filing-docx", async (req, res) => {
@@ -166,6 +179,7 @@ app.get("/__diag", (_req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
 
 
 
