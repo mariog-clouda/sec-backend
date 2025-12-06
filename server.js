@@ -7,12 +7,12 @@ const ExcelJS = require("exceljs");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Your Cloudflare Worker (serves formatted Form 4 at /form4?accession=...)
+// Cloudflare Worker: serves formatted Form 4 at /form4?accession=...
 const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
 
-// Api2Pdf (Chrome HTML→PDF) – set these in Render → Environment
-const API2PDF_ENDPOINT = process.env.API2PDF_ENDPOINT; // e.g. https://v2.api2pdf.com/chrome/url-to-pdf
-const API2PDF_KEY = process.env.API2PDF_KEY;           // your Api2Pdf key
+// PDFShift (Headless Chrome HTML→PDF)
+const PDFSHIFT_ENDPOINT = process.env.PDFSHIFT_ENDPOINT; // https://api.pdfshift.io/v3/convert/pdf
+const PDFSHIFT_KEY = process.env.PDFSHIFT_KEY;           // your PDFShift API key
 
 // ----------------- helpers -----------------
 async function fetchText(url) {
@@ -24,11 +24,9 @@ async function fetchText(url) {
   return r.text();
 }
 
-// For now, handle Form 4 via /form4; extend later for 8-K/10-K/etc.
+// For v1 we handle Form 4 via /form4 (extend later for other forms)
 async function getFilingHtml(_cik, accession, form) {
-  const isForm4 = String(form).trim() === "4";
   const url = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
-  // We always call /form4 while you’re finishing v1; change this when adding more forms.
   return fetchText(url);
 }
 
@@ -39,83 +37,56 @@ app.get("/", (_req, res) => {
   res.send("SEC Backend running");
 });
 
-// PDF (styled) via Api2Pdf (Chrome renders XML+XSL like a browser)
-
+// PDF via PDFShift (styled, Chrome-rendered)
 app.get("/filing-pdf", async (req, res) => {
   const { cik, accession, form, debug } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
-
-  const API2PDF_ENDPOINT = process.env.API2PDF_ENDPOINT;
-  const API2PDF_KEY = process.env.API2PDF_KEY;
-  if (!API2PDF_ENDPOINT || !API2PDF_KEY) return res.status(500).send("PDF API not configured");
+  if (!PDFSHIFT_ENDPOINT || !PDFSHIFT_KEY) return res.status(500).send("PDF API not configured");
 
   try {
     const filingUrl = `${WORKER_BASE_URL}form4?accession=${encodeURIComponent(accession)}`;
 
-    // Call Api2Pdf
-    const r = await fetch(API2PDF_ENDPOINT, {
+    // PDFShift uses Basic Auth with the API key as the username.
+    const auth = "Basic " + Buffer.from(`${PDFSHIFT_KEY}:`).toString("base64");
+
+    const r = await fetch(PDFSHIFT_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": API2PDF_KEY
+        "Authorization": auth
       },
       body: JSON.stringify({
-        url: filingUrl,
-        printBackground: true,
-        inline: false,            // v2 parameter name
-        usePrintCss: true,
-        marginTop: 0.5,
-        marginBottom: 0.5,
-        marginLeft: 0.5,
-        marginRight: 0.5
+        source: filingUrl,
+        use_print: true,
+        include_background: true,
+        landscape: false,
+        margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 }
       })
     });
 
-    // If debug=1, return raw API response text so we can see errors
-    const raw = await r.text();
+    // Debug passthrough (inspect provider response)
     if (debug === "1") {
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-      return res.status(r.status).send(raw);
+      const txt = await r.text();
+      return res.status(r.status).send(txt);
     }
 
     if (!r.ok) {
-      console.error("Api2Pdf HTTP error:", r.status, raw);
+      const txt = await r.text().catch(() => "");
+      console.error("PDFShift error:", r.status, txt);
       return res.status(500).send("Error from PDF API");
     }
 
-    // Parse JSON and fetch the PDF URL
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      console.error("Api2Pdf non-JSON response:", raw.slice(0, 300));
-      return res.status(500).send("Unexpected PDF API response");
-    }
-
-    if (!data.success || !data.pdf) {
-      console.error("Api2Pdf reported failure:", data);
-      return res.status(500).send("PDF API reported failure");
-    }
-
-    const pdfFetch = await fetch(data.pdf);
-    if (!pdfFetch.ok) {
-      const t = await pdfFetch.text().catch(() => "");
-      console.error("Fetch generated PDF failed:", pdfFetch.status, t);
-      return res.status(500).send("Failed to fetch generated PDF");
-    }
-
-    const buf = Buffer.from(await pdfFetch.arrayBuffer());
+    const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="filing-${cik}-${form}.pdf"`);
-    res.send(buf);
+    return res.send(buf);
   } catch (e) {
     console.error("PDF generation error:", e);
     res.status(500).send("Error generating PDF");
   }
 });
 
-
-// DOCX (turn Worker HTML into .docx)
+// DOCX (convert Worker HTML to .docx)
 app.get("/filing-docx", async (req, res) => {
   const { cik, accession, form } = req.query;
   if (!cik || !accession || !form) return res.status(400).send("Missing required query params");
@@ -132,7 +103,7 @@ app.get("/filing-docx", async (req, res) => {
   }
 });
 
-// XLSX (first table found in the HTML)
+// XLSX (first table found)
 function extractFirstTable(html) {
   const $ = cheerio.load(html);
   const table = $("table").first();
@@ -169,12 +140,12 @@ app.get("/filing-xlsx", async (req, res) => {
   }
 });
 
-// quick env/debug route
+// Quick env diagnostic
 app.get("/__diag", (_req, res) => {
   res.json({
     workerBaseUrl: WORKER_BASE_URL,
-    api2pdfEndpoint: process.env.API2PDF_ENDPOINT || null,
-    hasApi2pdfKey: !!process.env.API2PDF_KEY
+    pdfshiftEndpoint: PDFSHIFT_ENDPOINT || null,
+    hasPdfshiftKey: !!PDFSHIFT_KEY
   });
 });
 
