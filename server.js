@@ -156,7 +156,17 @@ app.get("/filing-xlsx", async (req, res) => {
   }
 });
 
+// quick env/debug route
+app.get("/__diag", (_req, res) => {
+  res.json({
+    workerBaseUrl: WORKER_BASE_URL,
+    api2pdfEndpoint: process.env.API2PDF_ENDPOINT || null,
+    hasApi2pdfKey: !!process.env.API2PDF_KEY
+  });
+});
+
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
 
 
 
