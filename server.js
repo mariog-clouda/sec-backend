@@ -341,11 +341,11 @@ app.get("/filing-docx", async function (req, res) {
     }
 
     // Convert HTML → DOCX (pure HTML only)
-  const docxBuffer = await htmlToDocx(html);
+const docxBuffer = await htmlToDocx(html);
+res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+res.setHeader("Content-Disposition", "attachment; filename=\"filing-" + cik + "-" + formUpper + ".docx\"");
+return res.send(Buffer.from(docxBuffer));
 
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.setHeader("Content-Disposition", "attachment; filename=\"filing-" + cik + "-" + formUpper + ".docx\"");
-    return res.send(Buffer.from(docxBuffer));
 
   } catch (e) {
     console.error("DOCX generation error:", e);
@@ -418,6 +418,7 @@ app.get("/__diag", function (_req, res) {
 app.listen(PORT, function () {
   console.log("Server running on port", PORT);
 });
+
 
 
 
