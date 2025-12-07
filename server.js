@@ -298,8 +298,8 @@ app.get("/filing-pdf", async function (req, res) {
 });
 
 // DOCX (all forms)
-// - HTML: convert directly
-// - XML: Form 4 uses worker-rendered HTML; others are wrapped as <pre> so it's readable
+
+// DOCX (mirror PDF flow): convert HTML to Word; no XML prettify/fallbacks
 app.get("/filing-docx", async function (req, res) {
   const cik = req.query.cik;
   const accession = req.query.accession;
@@ -313,36 +313,35 @@ app.get("/filing-docx", async function (req, res) {
     const primaryUrl = await resolvePrimaryUrl(cik, accession, form);
     const formUpper = (form || "").trim().toUpperCase();
 
-    let htmlSourceUrl = primaryUrl;
-    const isXml = /\.xml($|\?)/i.test(primaryUrl);
+    // If SEC's primary doc is already a PDF, we can't make a DOCX here
+    if (/\.pdf($|\?)/i.test(primaryUrl)) {
+      return res.status(400).send("Primary document is a native PDF; DOCX not available");
+    }
 
-    if (isXml) {
-      if (formUpper === "4") {
-        htmlSourceUrl = WORKER_BASE_URL + "form4?accession=" + encodeURIComponent(accession);
+    // Choose HTML source:
+    // - Form 4 = Worker-rendered HTML (ownership XML → nice HTML)
+    // - Else = primary must already be HTML
+    let htmlUrl = primaryUrl;
+    if (!isHtmlName(primaryUrl)) {
+      const isXml = /\.xml($|\?)/i.test(primaryUrl);
+      if (isXml && formUpper === "4") {
+        htmlUrl = WORKER_BASE_URL + "form4?accession=" + encodeURIComponent(accession);
       } else {
-        htmlSourceUrl = primaryUrl; // will wrap as pre below
+        return res.status(400).send("Primary document is not HTML; cannot create DOCX");
       }
     }
 
-    let content = await fetchText(htmlSourceUrl, { headers: SEC_HEADERS });
-
-    if (isXml && formUpper !== "4") {
-      const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      content =
+    // Fetch HTML and ensure full document wrapper for reliable conversion
+    let html = await fetchText(htmlUrl, { headers: SEC_HEADERS });
+    if (!/<!doctype html>|<html[\s>]/i.test(html)) {
+      html =
         "<!doctype html><html><head><meta charset=\"utf-8\">" +
         "<title>" + ("Filing " + formUpper + " " + accession) + "</title>" +
-        "<style>body{font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.4} pre{white-space:pre-wrap;word-wrap:break-word}</style>" +
-        "</head><body><pre>" + esc(content) + "</pre></body></html>";
-    } else {
-      if (!/<!doctype html>|<html[\s>]/i.test(content)) {
-        content =
-          "<!doctype html><html><head><meta charset=\"utf-8\">" +
-          "<title>" + ("Filing " + formUpper + " " + accession) + "</title>" +
-          "</head><body>" + content + "</body></html>";
-      }
+        "</head><body>" + html + "</body></html>";
     }
 
-    const docxBuffer = await HTMLtoDOCX(content, null, {
+    // Convert HTML → DOCX (pure HTML only)
+    const docxBuffer = HTMLtoDOCX(html, null, {
       table: { row: { cantSplit: true } },
       footer: true,
       pageNumber: true
@@ -357,6 +356,11 @@ app.get("/filing-docx", async function (req, res) {
     return res.status(500).send("Error generating DOCX");
   }
 });
+
+
+
+
+
 
 // XLSX (first table in primary HTML)
 function extractFirstTable(html) {
@@ -418,6 +422,7 @@ app.get("/__diag", function (_req, res) {
 app.listen(PORT, function () {
   console.log("Server running on port", PORT);
 });
+
 
 
 
