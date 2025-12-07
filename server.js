@@ -3,7 +3,6 @@ const express = require("express");
 const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const ExcelJS = require("exceljs");
-const htmlToDocx = require("html-to-docx");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -299,64 +298,6 @@ app.get("/filing-pdf", async function (req, res) {
 
 // DOCX (all forms)
 
-// DOCX (mirror PDF flow): convert HTML to Word; no XML prettify/fallbacks
-app.get("/filing-docx", async function (req, res) {
-  const cik = req.query.cik;
-  const accession = req.query.accession;
-  const form = req.query.form;
-
-  if (!cik || !accession || !form) {
-    return res.status(400).send("Missing required query params");
-  }
-
-  try {
-    const primaryUrl = await resolvePrimaryUrl(cik, accession, form);
-    const formUpper = (form || "").trim().toUpperCase();
-
-    // If SEC's primary doc is already a PDF, we can't make a DOCX here
-    if (/\.pdf($|\?)/i.test(primaryUrl)) {
-      return res.status(400).send("Primary document is a native PDF; DOCX not available");
-    }
-
-    // Choose HTML source:
-    // - Form 4 = Worker-rendered HTML (ownership XML → nice HTML)
-    // - Else = primary must already be HTML
-    let htmlUrl = primaryUrl;
-    if (!isHtmlName(primaryUrl)) {
-      const isXml = /\.xml($|\?)/i.test(primaryUrl);
-      if (isXml && formUpper === "4") {
-        htmlUrl = WORKER_BASE_URL + "form4?accession=" + encodeURIComponent(accession);
-      } else {
-        return res.status(400).send("Primary document is not HTML; cannot create DOCX");
-      }
-    }
-
-    // Fetch HTML and ensure full document wrapper for reliable conversion
-    let html = await fetchText(htmlUrl, { headers: SEC_HEADERS });
-    if (!/<!doctype html>|<html[\s>]/i.test(html)) {
-      html =
-        "<!doctype html><html><head><meta charset=\"utf-8\">" +
-        "<title>" + ("Filing " + formUpper + " " + accession) + "</title>" +
-        "</head><body>" + html + "</body></html>";
-    }
-
-    // Convert HTML → DOCX (pure HTML only)
-const docxBuffer = await htmlToDocx(html);
-res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-res.setHeader("Content-Disposition", "attachment; filename=\"filing-" + cik + "-" + formUpper + ".docx\"");
-return res.send(Buffer.from(docxBuffer));
-
-
-  } catch (e) {
-    console.error("DOCX generation error:", e);
-    return res.status(500).send("Error generating DOCX");
-  }
-});
-
-
-
-
-
 
 // XLSX (first table in primary HTML)
 function extractFirstTable(html) {
@@ -418,6 +359,7 @@ app.get("/__diag", function (_req, res) {
 app.listen(PORT, function () {
   console.log("Server running on port", PORT);
 });
+
 
 
 
