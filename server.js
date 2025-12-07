@@ -1,21 +1,24 @@
+// server.js
 const express = require("express");
 const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const ExcelJS = require("exceljs");
+const HTMLtoDOCX = require("html-docx-js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const WORKER_BASE_URL = "https://sec-fillings.mariog.workers.dev/";
 
-const PDFSHIFT_ENDPOINT = process.env.PDFSHIFT_ENDPOINT;
-const PDFSHIFT_KEY = process.env.PDFSHIFT_KEY;
+const PDFSHIFT_ENDPOINT = process.env.PDFSHIFT_ENDPOINT; // e.g. https://api.pdfshift.io/v3/convert/pdf
+const PDFSHIFT_KEY = process.env.PDFSHIFT_KEY;           // your key only; we add "api:" for Basic auth
 
 const SEC_HEADERS = {
   "User-Agent": "CloudastructureSECWidget/1.0 (https://www.cloudastructure.com/contact)",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 };
 
+// ---------- helpers ----------
 function cleanCik(cik) {
   return String(cik).replace(/^0+/, "");
 }
@@ -30,7 +33,6 @@ function secArchiveBase(cik, accession) {
 function isHtmlName(name) {
   return /\.html?$/i.test(name || "");
 }
-
 async function fetchText(url, options = {}) {
   const r = await fetch(url, options);
   if (!r.ok) {
@@ -40,6 +42,7 @@ async function fetchText(url, options = {}) {
   return r.text();
 }
 
+// ---------- your mapped filename patterns ----------
 const FORM_FILENAME_PATTERNS = {
   "1-A": [/xsl1-A_X01\/primary_doc\.xml/i],
   "1-A POS": [/xsl1-A_X01\/primary_doc\.xml/i],
@@ -81,6 +84,7 @@ const FORM_FILENAME_PATTERNS = {
   "DEFR14A": [/cloud_defr14a\.htm/i]
 };
 
+// deterministic XSL paths for ownership
 const OWNERSHIP_FORM_MAP = {
   "3": "xslF345X02/ownership.xml",
   "3/A": "xslF345X02/ownership.xml",
@@ -90,6 +94,7 @@ const OWNERSHIP_FORM_MAP = {
   "5/A": "xslF345X03/ownership.xml"
 };
 
+// deterministic XSL for some others
 function directXslIfKnown(formUpper) {
   if (formUpper === "144") return "xsl144X01/primary_doc.xml";
   if (formUpper === "EFFECT") return "xslEFFECTX01/primary_doc.xml";
@@ -105,6 +110,7 @@ function directXslIfKnown(formUpper) {
   return null;
 }
 
+// parse SEC index to pick primary document
 async function getPrimaryFromSecIndex(cik, accession, formUpper) {
   const base = secArchiveBase(cik, accession);
   const accClean = cleanAccession(accession);
@@ -145,6 +151,7 @@ async function getPrimaryFromSecIndex(cik, accession, formUpper) {
 
   if (!rows.length) throw new Error("No document rows found in SEC index");
 
+  // try your explicit patterns first
   const pats = FORM_FILENAME_PATTERNS[formUpper];
   if (pats && pats.length) {
     for (const rx of pats) {
@@ -153,10 +160,8 @@ async function getPrimaryFromSecIndex(cik, accession, formUpper) {
     }
   }
 
-  const isHtmlDoc = function (r) {
-    return isHtmlName(r.document);
-  };
-
+  // fallbacks
+  const isHtmlDoc = (r) => isHtmlName(r.document);
   let sameType = rows.filter(r => r.type === formUpper);
   if (sameType.length) {
     let htmlSameType = sameType.filter(isHtmlDoc);
@@ -176,6 +181,7 @@ async function getPrimaryFromSecIndex(cik, accession, formUpper) {
   return base + rows[0].document;
 }
 
+// worker fallback
 async function getPrimaryFromWorker(cik, accession, formUpper) {
   const r = await fetch(WORKER_BASE_URL + "filing?accession=" + encodeURIComponent(accession));
   if (!r.ok) {
@@ -205,6 +211,7 @@ async function getPrimaryFromWorker(cik, accession, formUpper) {
   return files[0].url;
 }
 
+// unified resolver
 async function resolvePrimaryUrl(cik, accession, formRaw) {
   const formUpper = (formRaw || "").trim().toUpperCase();
   const base = secArchiveBase(cik, accession);
@@ -223,12 +230,12 @@ async function resolvePrimaryUrl(cik, accession, formRaw) {
   return await getPrimaryFromWorker(cik, accession, formUpper);
 }
 
-// ROUTES
-
+// ---------- routes ----------
 app.get("/", function (_req, res) {
   res.send("SEC Backend running");
 });
 
+// PDFs (all forms)
 app.get("/filing-pdf", async function (req, res) {
   const cik = req.query.cik;
   const accession = req.query.accession;
@@ -245,6 +252,7 @@ app.get("/filing-pdf", async function (req, res) {
   try {
     const primaryUrl = await resolvePrimaryUrl(cik, accession, form);
 
+    // SEC already has a PDF → redirect
     if (/\.pdf($|\?)/i.test(primaryUrl)) {
       return res.redirect(primaryUrl);
     }
@@ -289,6 +297,68 @@ app.get("/filing-pdf", async function (req, res) {
   }
 });
 
+// DOCX (all forms)
+// - HTML: convert directly
+// - XML: Form 4 uses worker-rendered HTML; others are wrapped as <pre> so it's readable
+app.get("/filing-docx", async function (req, res) {
+  const cik = req.query.cik;
+  const accession = req.query.accession;
+  const form = req.query.form;
+
+  if (!cik || !accession || !form) {
+    return res.status(400).send("Missing required query params");
+  }
+
+  try {
+    const primaryUrl = await resolvePrimaryUrl(cik, accession, form);
+    const formUpper = (form || "").trim().toUpperCase();
+
+    let htmlSourceUrl = primaryUrl;
+    const isXml = /\.xml($|\?)/i.test(primaryUrl);
+
+    if (isXml) {
+      if (formUpper === "4") {
+        htmlSourceUrl = WORKER_BASE_URL + "form4?accession=" + encodeURIComponent(accession);
+      } else {
+        htmlSourceUrl = primaryUrl; // will wrap as pre below
+      }
+    }
+
+    let content = await fetchText(htmlSourceUrl, { headers: SEC_HEADERS });
+
+    if (isXml && formUpper !== "4") {
+      const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      content =
+        "<!doctype html><html><head><meta charset=\"utf-8\">" +
+        "<title>" + ("Filing " + formUpper + " " + accession) + "</title>" +
+        "<style>body{font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.4} pre{white-space:pre-wrap;word-wrap:break-word}</style>" +
+        "</head><body><pre>" + esc(content) + "</pre></body></html>";
+    } else {
+      if (!/<!doctype html>|<html[\s>]/i.test(content)) {
+        content =
+          "<!doctype html><html><head><meta charset=\"utf-8\">" +
+          "<title>" + ("Filing " + formUpper + " " + accession) + "</title>" +
+          "</head><body>" + content + "</body></html>";
+      }
+    }
+
+    const docxBuffer = await HTMLtoDOCX(content, null, {
+      table: { row: { cantSplit: true } },
+      footer: true,
+      pageNumber: true
+    });
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    res.setHeader("Content-Disposition", "attachment; filename=\"filing-" + cik + "-" + formUpper + ".docx\"");
+    return res.send(Buffer.from(docxBuffer));
+
+  } catch (e) {
+    console.error("DOCX generation error:", e);
+    return res.status(500).send("Error generating DOCX");
+  }
+});
+
+// XLSX (first table in primary HTML)
 function extractFirstTable(html) {
   const $ = cheerio.load(html);
   const table = $("table").first();
@@ -336,6 +406,7 @@ app.get("/filing-xlsx", async function (req, res) {
   }
 });
 
+// diagnostics
 app.get("/__diag", function (_req, res) {
   res.json({
     workerBaseUrl: WORKER_BASE_URL,
@@ -347,7 +418,6 @@ app.get("/__diag", function (_req, res) {
 app.listen(PORT, function () {
   console.log("Server running on port", PORT);
 });
-
 
 
 
