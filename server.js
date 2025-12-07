@@ -3,7 +3,7 @@ const express = require("express");
 const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const ExcelJS = require("exceljs");
-const HTMLtoDOCX = require("html-docx-js");
+const htmlDocx = require("html-docx-js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -341,11 +341,7 @@ app.get("/filing-docx", async function (req, res) {
     }
 
     // Convert HTML → DOCX (pure HTML only)
-    const docxBuffer = HTMLtoDOCX(html, null, {
-      table: { row: { cantSplit: true } },
-      footer: true,
-      pageNumber: true
-    });
+  const docxBuffer = htmlDocx.asBuffer(html);
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     res.setHeader("Content-Disposition", "attachment; filename=\"filing-" + cik + "-" + formUpper + ".docx\"");
@@ -422,6 +418,7 @@ app.get("/__diag", function (_req, res) {
 app.listen(PORT, function () {
   console.log("Server running on port", PORT);
 });
+
 
 
 
